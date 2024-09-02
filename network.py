@@ -1,15 +1,13 @@
+#!/usr/bin/env python3
+"""Class representing the Neural Network and focuses on the math of backpropagation."""
+
 import random
-
 import numpy as np
+from network_utils import sigmoid, sigmoid_prime
 
-
-def _sigmoid(z):
-    """Get the output value of the sigmoid function for a given z."""
-    return 1.0 / (1.0 + np.exp(-z))
-
-
-def _prime_sigmoid(z):
-    return _sigmoid(z) * (1 - _sigmoid(z))
+__all__ = (
+    "ArtificialNeuralNetwork",
+)
 
 
 class ArtificialNeuralNetwork:
@@ -26,15 +24,15 @@ class ArtificialNeuralNetwork:
         """Get the output of the network based on the input."""
         for w, b in zip(self.weights, self.biases):
             z = np.dot(w, a) + b
-            a = _sigmoid(z)
+            a = sigmoid(z)
         return a
 
-    def sgd(self, training_data, epochs: int, mini_match_size: int, eta: float, test_data=None):
+    def sgd(self, training_data, epochs: int, mini_batch_size: int, eta: float, test_data=None):
         """Train the neural network using mini-batch stochastic gradient descent.
 
         :param training_data: list of tuples '(x, y)' representing the training inputs and the deserved outputs
         :param epochs: the number of epochs to train for
-        :param mini_match_size: size of the mini-batches to use when sampling
+        :param mini_batch_size: size of the mini-batches to use when sampling
         :param eta: the learning rate
         :param test_data: if not none the network will emulate against the test data after each epoch.
         """
@@ -42,7 +40,7 @@ class ArtificialNeuralNetwork:
         n = len(training_data)
         for j in range(epochs):
             random.shuffle(training_data)
-            mini_batches = [training_data[k:k + mini_match_size] for k in range(0, n, mini_match_size)]
+            mini_batches = [training_data[k:k + mini_batch_size] for k in range(0, n, mini_batch_size)]
             for mini_batch in mini_batches:
                 self.update_mini_batch(mini_batch, eta)
             if test_data:
@@ -97,11 +95,11 @@ class ArtificialNeuralNetwork:
             z = np.dot(w, activation) + b
             zs.append(z)
             # the output from layer i
-            activation = _sigmoid(z)
+            activation = sigmoid(z)
             activations.append(activation)
         # Step 3: Output error direct_delta^{x,L}: Compute the vector
         #   diract_deta^{x,L} = grad_a(C_x) (*) sigma_prime(z^{x, L})
-        delta = (activations[-1] - y) * _prime_sigmoid(zs[-1])
+        delta = (activations[-1] - y) * sigmoid_prime(zs[-1])
         # dC/db^L = delta^L
         nabla_b[-1] = delta
         # dC/dw^L = delta^L * a^{L-1}
@@ -111,7 +109,7 @@ class ArtificialNeuralNetwork:
         #       delta^{x, l} = ((w^{l+1})^T * delta^{l+1}) (*) sigma_prime(z^l)
         for l in range(2, self.num_layers):
             z = zs[-l]
-            sp = _prime_sigmoid(z)
+            sp = sigmoid_prime(z)
             delta = np.dot(self.weights[-l + 1].transpose(), delta) * sp
             nabla_b[-l] = delta
             nabla_w[-l] = np.dot(delta, activations[-l - 1].transpose())
