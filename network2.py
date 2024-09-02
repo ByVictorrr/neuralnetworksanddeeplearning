@@ -79,15 +79,17 @@ class Network:
             a = sigmoid(z)
         return a
 
-    def sgd(self, training_data, epochs, mini_batch_size, eta,
-            lmbda=0.0,
-            evaluation_data=None,
-            monitor_evaluation_cost=False,
-            monitor_evaluation_accuracy=False,
-            monitor_training_cost=False,
-            monitor_training_accuracy=False):
+    def sgd(self, training_data, epochs, mini_batch_size, eta, lmbda=0.0, patience=10, use_learning_schedule=True,
+            evaluation_data=None, **kwargs):
+        monitor_evaluation_cost = kwargs.pop("monitor_training_cost", False)
+        monitor_evaluation_accuracy = kwargs.pop("monitor_evaluation_accuracy", False)
+        monitor_training_cost = kwargs.pop("monitor_training_cost", False)
+        monitor_training_accuracy = kwargs.pop("monitor_training_accuracy", False)
         evaluation_cost, evaluation_accuracy = [], []
         training_cost, training_accuracy = [], []
+        best_accuracy = 0  # To keep track of the best accuracy so far
+        patience_counter = 0  # To keep track of how many epochs without improvement
+        initial_eta = eta  # Store the initial learning rate
         for j in range(epochs):
             random.shuffle(training_data)
             mini_batches = [training_data[k:k + mini_batch_size] for k in range(0, len(training_data), mini_batch_size)]
@@ -102,6 +104,27 @@ class Network:
                 accuracy = self.accuracy(training_data, is_training_data=True)
                 training_accuracy.append(accuracy)
                 print(f"Accuracy on training data: {accuracy/len(training_data)=}")
+                # Check if current evaluation accuracy is better than the best seen so far
+                if accuracy > best_accuracy:
+                    best_accuracy = accuracy
+                    patience_counter = 0  # Reset patience counter if improvement is seen
+                else:
+                    patience_counter += 1
+
+                # Check if patience is exhausted
+                if patience_counter >= patience:
+                    if not use_learning_schedule:
+                        print(f"Stopping early at epoch {j + 1} due to no improvement in {patience} epochs.")
+                        break
+                    eta /= 2  # Halve the learning rate
+                    patience_counter = 0  # Reset the patience counter
+                    print(f"No improvement in {patience} epochs, halving learning rate to {eta}")
+
+                    # Check if learning rate has dropped below 1/128 of the initial value
+                    if eta < initial_eta / 128:
+                        print(f"Learning rate has dropped below 1/128 of the initial value, stopping training.")
+                        break
+
             if monitor_evaluation_cost and evaluation_data:
                 cost = self.total_cost(evaluation_data, is_training_data=False)
                 training_cost.append(cost)
@@ -225,7 +248,7 @@ if __name__ == "__main__":
 
     training_data, validation_data, test_data = load_data_wrapper()
     nn = Network(784, 30, 10)
-    epochs = 1
+    epochs = 30
     nn.sgd(training_data, epochs=epochs, mini_batch_size=10, eta=0.5, lmbda=5.0,
            evaluation_data=validation_data,
            monitor_evaluation_accuracy=True,
