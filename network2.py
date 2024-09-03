@@ -58,7 +58,8 @@ class Network:
         self.num_layers = len(sizes)
         self._sizes = sizes
         self._cost_obj = cost if cost else CrossEntropyCost()
-        self.weights, self.biases = [], []
+        self.weights, self.biases, self.velocities = [], [], []
+        self.biases = [np.random.randn(s, 1) for s in self._sizes[1:]]
         self.default_weight_initializer()
 
     def default_weight_initializer(self):
@@ -66,11 +67,15 @@ class Network:
         self.biases = [np.random.randn(s, 1) for s in self._sizes[1:]]
         self.weights = [np.random.randn(self._sizes[i + 1], self._sizes[i]) / np.sqrt(self._sizes[i]) for i in
                         range(0, len(self._sizes) - 1)]
+        # Momentum-based
+        self.velocities = [np.random.randn(self._sizes[i + 1], self._sizes[i]) for i in range(0, len(self._sizes) - 1)]
 
     def large_weight_initializer(self):
         """Initialize each weight using a Gaussian distribution with mean 0 and std_dev 1."""
         self.biases = [np.random.randn(s, 1) for s in self._sizes[1:]]
         self.weights = [np.random.randn(self._sizes[i + 1], self._sizes[i]) for i in range(0, len(self._sizes) - 1)]
+        # Momentum-based
+        self.velocities = [np.random.randn(self._sizes[i + 1], self._sizes[i]) for i in range(0, len(self._sizes) - 1)]
 
     def feed_forward(self, a):
         """Get the output of the network based on the input."""
@@ -79,7 +84,8 @@ class Network:
             a = sigmoid(z)
         return a
 
-    def sgd(self, training_data, epochs, mini_batch_size, eta, lmbda=0.0, patience=10, use_learning_schedule=True,
+    def sgd(self, training_data, epochs, mini_batch_size, eta, lmbda=0.0, friction_coef=.5,
+            patience=10, use_learning_schedule=True,
             evaluation_data=None, **kwargs):
         monitor_evaluation_cost = kwargs.pop("monitor_training_cost", False)
         monitor_evaluation_accuracy = kwargs.pop("monitor_evaluation_accuracy", False)
@@ -94,7 +100,7 @@ class Network:
             random.shuffle(training_data)
             mini_batches = [training_data[k:k + mini_batch_size] for k in range(0, len(training_data), mini_batch_size)]
             for mini_batch in mini_batches:
-                self.update_mini_batch(mini_batch, eta, lmbda, len(training_data))
+                self.update_mini_batch(mini_batch, eta, lmbda, friction_coef, len(training_data))
             print(f"Epoch {j} training complete")
             if monitor_training_cost:
                 cost = self.total_cost(training_data, is_training_data=True)
@@ -103,7 +109,7 @@ class Network:
             if monitor_training_accuracy:
                 accuracy = self.accuracy(training_data, is_training_data=True)
                 training_accuracy.append(accuracy)
-                print(f"Accuracy on training data: {accuracy/len(training_data)=}")
+                print(f"Accuracy on training data: {(accuracy/len(training_data))*100=}")
                 # Check if current evaluation accuracy is better than the best seen so far
                 if accuracy > best_accuracy:
                     best_accuracy = accuracy
@@ -113,16 +119,17 @@ class Network:
 
                 # Check if patience is exhausted
                 if patience_counter >= patience:
-                    if not use_learning_schedule:
+                    if use_learning_schedule:
+                        eta /= 2  # Halve the learning rate
+                        patience_counter = 0  # Reset the patience counter
+                        print(f"No improvement in {patience} epochs, halving learning rate to {eta}")
+                        # Check if learning rate has dropped below 1/128 of the initial value
+                        if eta < initial_eta / 128:
+                            print(f"Learning rate has dropped below 1/128 of the initial value, stopping training.")
+                            break
+                        print(f"Learning rate is now: {eta=} from {initial_eta=}")
+                    else:
                         print(f"Stopping early at epoch {j + 1} due to no improvement in {patience} epochs.")
-                        break
-                    eta /= 2  # Halve the learning rate
-                    patience_counter = 0  # Reset the patience counter
-                    print(f"No improvement in {patience} epochs, halving learning rate to {eta}")
-
-                    # Check if learning rate has dropped below 1/128 of the initial value
-                    if eta < initial_eta / 128:
-                        print(f"Learning rate has dropped below 1/128 of the initial value, stopping training.")
                         break
 
             if monitor_evaluation_cost and evaluation_data:
@@ -132,11 +139,11 @@ class Network:
             if monitor_evaluation_accuracy and evaluation_data:
                 accuracy = self.accuracy(evaluation_data, is_training_data=False)
                 training_accuracy.append(accuracy)
-                print(f"Accuracy on evaluation data: {accuracy/len(evaluation_data)=}")
+                print(f"Accuracy on evaluation data: {accuracy/len(evaluation_data)*100=}")
 
         return evaluation_cost, evaluation_accuracy, training_cost, training_accuracy
 
-    def update_mini_batch(self, mini_batch, eta, lmda, training_size):
+    def update_mini_batch(self, mini_batch, eta, lmda, friction_coef, training_size):
         """Update nn weighs & biases by applying gradient descent using backpropagation to a single mini batch.
 
         :param mini_batch: a list of tuples
@@ -156,9 +163,16 @@ class Network:
             nabla_b = [nb + dnb for nb, dnb in zip(nabla_b, delta_nabla_b)]
             # nabla_w = sum(delta^{x,l} * (a^{x, l-1})^T)
             nabla_w = [nw + dnw for nw, dnw in zip(nabla_w, delta_nabla_w)]
-        #  w^l= (1-(eta * lmda)/n)w^l - (eta/m) * sum(delta^{x,l} * (a^{x, l-1})^T)
-        self.weights = [(1 - (eta * lmda) / training_size) * w - (eta / len(mini_batch)) * nw
-                        for w, nw in zip(self.weights, nabla_w)]
+
+        self.velocities = [
+            friction_coef * v - (eta / len(mini_batch)) * nw
+            for v, nw in zip(self.velocities, nabla_w)
+        ]
+        # Update weights using velocities (momentum term)
+        self.weights = [
+            (1 - (eta * lmda) / training_size) * w + v
+            for w, v in zip(self.weights, self.velocities)
+        ]
         #  b^l=b^l - (eta/m) * sum(delta^{x, l})
         self.biases = [b - (eta / len(mini_batch)) * nb for b, nb in zip(self.biases, nabla_b)]
 
@@ -185,7 +199,7 @@ class Network:
             activations.append(activation)
         # Step 3: Output error direct_delta^{x,L}: Compute the vector
         #   diract_deta^{x,L} = grad_a(C_x) (*) sigma_prime(z^{x, L})
-        delta = (activations[-1] - y) * sigmoid_prime(zs[-1])
+        delta = self._cost_obj.delta(zs[-1], activations[-1], y)
         # dC/db^L = delta^L
         nabla_b[-1] = delta
         # dC/dw^L = delta^L * a^{L-1}
@@ -249,7 +263,9 @@ if __name__ == "__main__":
     training_data, validation_data, test_data = load_data_wrapper()
     nn = Network(784, 30, 10)
     epochs = 30
-    nn.sgd(training_data, epochs=epochs, mini_batch_size=10, eta=0.5, lmbda=5.0,
+    eta = 5.0
+    mini_batch_size = 50
+    nn.sgd(training_data, epochs=epochs, mini_batch_size=mini_batch_size, eta=eta, lmbda=5.0,
            evaluation_data=validation_data,
            monitor_evaluation_accuracy=True,
            monitor_evaluation_cost=True,
