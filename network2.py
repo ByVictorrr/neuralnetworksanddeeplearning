@@ -11,7 +11,6 @@ import abc
 import json
 from typing import Optional
 import random
-import sys
 import numpy as np
 
 from network_utils import sigmoid, sigmoid_prime
@@ -263,8 +262,8 @@ if __name__ == "__main__":
     training_data, validation_data, test_data = load_data_wrapper()
     nn = Network(784, 30, 10)
     epochs = 30
-    eta = 5.0
-    mini_batch_size = 50
+    eta = 0.5
+    mini_batch_size = 30
     nn.sgd(training_data, epochs=epochs, mini_batch_size=mini_batch_size, eta=eta, lmbda=5.0,
            evaluation_data=validation_data,
            monitor_evaluation_accuracy=True,
