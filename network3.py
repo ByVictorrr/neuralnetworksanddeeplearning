@@ -18,11 +18,13 @@ from theano.tensor.signal import pool
 def linear(z): return z
 
 
-def relu(z):
-    return T.maximum(0.0, z)
+def ReLU(z): return T.maximum(0.0, z)
 
 
-try_gpu = True
+from theano.tensor.nnet import sigmoid
+from theano.tensor import tanh
+
+try_gpu = False
 if try_gpu:
     print("Trying to run under a GPU.  If this is not desired, then modify network3.py to set the GPU flag to False.")
     try:
@@ -35,7 +37,7 @@ else:
 
 
 #### Load the MNIST data
-def load_data_shared(filename="/data/mnist.pkl.gz"):
+def load_data_shared(filename="data/mnist.pkl.gz"):
     with gzip.open(filename, 'rb') as f:
         training_data, validation_data, test_data = pickle.load(f, encoding="latin1")
 
@@ -65,6 +67,13 @@ def size(data):
     return data[0].get_value(borrow=True).shape[0]
 
 
+def step_decay(epoch):
+    initial_eta = 0.01
+    drop = 0.5
+    epochs_drop = 10
+    return initial_eta * (drop ** np.floor((1 + epoch) / epochs_drop))
+
+
 class Network:
     def __init__(self, layers, mini_batch_size):
         """Init for the Convolutional Neural Network.
@@ -84,30 +93,36 @@ class Network:
         self.output = layers[-1].output
         self.output_dropout = layers[-1].output_dropout
 
-    def sdg(self, training_data, epochs, eta, validation_data, test_data, lmbda=0.0):
-        """Train the network using mini-batch stochastic gradient descent."""
+    def sgd(self, training_data, epochs, validation_data, test_data, eta=step_decay, lmbda=0.0, patience=10):
+        """Train the network using mini-batch stochastic gradient descent with early stopping and dynamic learning rate.
+
+        eta can be a function of epoch (e.g., eta(epoch)).
+
+        :param training_data: tuple of training data (x, y)
+        :param epochs: number of epochs to train for
+        :param eta: learning rate, can be a function of epoch (e.g., eta(epoch))
+        :param validation_data: tuple of validation data (x, y)
+        :param test_data: tuple of test data (x, y)
+        :param lmbda: L2 regularization term
+        :param patience: number of epochs with no improvement before stopping early
+        """
         training_x, training_y = training_data
         validation_x, validation_y = validation_data
         test_x, test_y = test_data
-        # compute number of mini batches for training, validation and testing
-        num_training_batches = size(training_data) / self.mini_batch_size
-        num_validation_batches = size(training_data) / self.mini_batch_size
-        num_test_batches = size(test_data) / self.mini_batch_size
-        # define the (regularized) cost function, symbolic gradients, and updates
+
+        # Compute number of mini-batches for training, validation, and testing
+        num_training_batches = size(training_data) // self.mini_batch_size
+        num_validation_batches = size(validation_data) // self.mini_batch_size
+        num_test_batches = size(test_data) // self.mini_batch_size
+
+        # Define the (regularized) cost function, symbolic gradients, and updates
         l2_norm_squared = sum([(layer.w ** 2).sum() for layer in self.layers])
         cost = self.layers[-1].cost(self) + 0.5 * lmbda * l2_norm_squared / num_training_batches
         grads = T.grad(cost, self.params)
-        updates = [(param, param - eta * grad) for param, grad in zip(self.params, grads)]
-        # define functions to train a mini-batch, and to compute the
-        # accuracy in validation and test mini-batches.
+
+        # Define functions to train a mini-batch and compute accuracy in validation and test mini-batches
         i = T.lscalar()  # mini-batch index
-        train_mb = theano.function(
-            [i], cost, updates=updates,
-            givens={
-                self.x: training_x[i * self.mini_batch_size: (i + 1) * self.mini_batch_size],
-                self.y: training_y[i * self.mini_batch_size: (i + 1) * self.mini_batch_size],
-            }
-        )
+
         validate_mb_accuracy = theano.function(
             [i], self.layers[-1].accuracy(self.y),
             givens={
@@ -122,31 +137,91 @@ class Network:
                 self.y: test_y[i * self.mini_batch_size: (i + 1) * self.mini_batch_size],
             }
         )
-        # to the actual training
+
+        # Initialize variables for training
         best_validation_accuracy = 0.0
         best_iteration = -1
         best_test_accuracy = 0.0
+        patience_counter = 0  # To keep track of how many epochs without improvement
+
         for epoch in range(epochs):
-            for mini_batch_idx in range(num_training_batches):
+            current_eta = eta(epoch)  # Compute the learning rate for the current epoch
+            print(f"Epoch {epoch}, learning rate {current_eta}")
+
+            # Update the weight update rule with the current learning rate
+            updates = [(param, param - current_eta * grad) for param, grad in zip(self.params, grads)]
+
+            # Define function to train a mini-batch with the updated learning rate
+            train_mb_with_updates = theano.function(
+                [i], cost, updates=updates,
+                givens={
+                    self.x: training_x[i * self.mini_batch_size: (i + 1) * self.mini_batch_size],
+                    self.y: training_y[i * self.mini_batch_size: (i + 1) * self.mini_batch_size],
+                }
+            )
+
+            # Perform training for the mini-batches
+            for mini_batch_idx in range(int(num_training_batches)):
                 iteration = num_training_batches * epoch + mini_batch_idx
                 if iteration % 100 == 0:
                     print(f"Training mini-batch number {iteration}")
-                cost_ij = train_mb(mini_batch_idx)
-                if (iteration + 1) % num_training_batches == 0:
-                    validation_accuracy = np.mean([validate_mb_accuracy(j) for j in range(num_validation_batches)])
-                    print(f"Epoch {epoch}: validation accuracy {validation_accuracy:.2%}")
-                    if validation_accuracy >= best_validation_accuracy:
-                        print("This is the best validation accuracy to date.")
-                        best_validation_accuracy = validation_accuracy
-                        best_iteration = iteration
-                        if test_data:
-                            test_accuracy = np.mean([test_mb_accuracy(j) for j in range(num_test_batches)])
-                            print(f"The corresponding test accuracy {test_accuracy:.2%}")
-                            if test_accuracy >= best_test_accuracy:
-                                best_test_accuracy = test_accuracy
+                cost_ij = train_mb_with_updates(mini_batch_idx)
+
+            # After each epoch, check the validation accuracy
+            validation_accuracy = np.mean([validate_mb_accuracy(j) for j in range(int(num_validation_batches))])
+            print(f"Epoch {epoch}: validation accuracy {validation_accuracy:.2%}")
+
+            # Check if the validation accuracy has improved
+            if validation_accuracy > best_validation_accuracy:
+                print("This is the best validation accuracy to date.")
+                best_validation_accuracy = validation_accuracy
+                best_iteration = epoch
+                patience_counter = 0  # Reset patience counter since there is an improvement
+                # Check test accuracy if test data is provided
+                if test_data:
+                    test_accuracy = np.mean([test_mb_accuracy(j) for j in range(int(num_test_batches))])
+                    print(f"The corresponding test accuracy {test_accuracy:.2%}")
+                    if test_accuracy > best_test_accuracy:
+                        best_test_accuracy = test_accuracy
+            else:
+                patience_counter += 1
+                print(f"Validation accuracy did not improve. Patience counter: {patience_counter}/{patience}")
+
+            # Early stopping: stop training if no improvement for 'patience' epochs
+            if patience_counter >= patience:
+                print(
+                    f"Early stopping at epoch {epoch} due to no improvement in validation accuracy for {patience} epochs.")
+                print(f"Best validation accuracy of {best_validation_accuracy:.2%} obtained at epoch {best_iteration}.")
+                print(f"Corresponding test accuracy of {best_test_accuracy:.2%}")
+                return  # Exit the function and stop training early
+
         print("Finished training network.")
-        print(f"Best validation accuracy of {best_validation_accuracy:.2%} obtained at iteration {best_iteration}.")
+        print(f"Best validation accuracy of {best_validation_accuracy:.2%} obtained at epoch {best_iteration}.")
         print(f"Corresponding test accuracy of {best_test_accuracy:.2%}")
+
+    def accuracy(self, data):
+        """Calculate accuracy for the given dataset.
+
+        :param data: tuple containing input data and corresponding labels
+        :return: the accuracy of the network's predictions on the data
+        """
+        x_data, y_data = data
+        num_batches = size(data) // self.mini_batch_size
+        i = T.lscalar()  # mini-batch index
+
+        # Define a Theano function to compute accuracy for a mini-batch
+        mini_batch_accuracy = theano.function(
+            [i],
+            self.layers[-1].accuracy(self.y),
+            givens={
+                self.x: x_data[i * self.mini_batch_size: (i + 1) * self.mini_batch_size],
+                self.y: y_data[i * self.mini_batch_size: (i + 1) * self.mini_batch_size]
+            }
+        )
+
+        # Calculate accuracy over all mini-batches
+        accuracy = np.mean([mini_batch_accuracy(j) for j in range(num_batches)])
+        return accuracy
 
 
 class ConvPoolLayer:
@@ -238,7 +313,7 @@ class SoftmaxLayer:
         self.p_dropout = p_dropout
         # Initialize weights and biases
         self.w = theano.shared(np.zeros((n_in, n_out), dtype=theano.config.floatX), borrow=True)
-        self.b = theano.shared(np.zeros((n_out,)), dtype=theano.config.floatX, borrow=True)
+        self.b = theano.shared(np.zeros((n_out,), dtype=theano.config.floatX), borrow=True)
         self.params = [self.w, self.b]
         # vars for set_inpt
         self.inpt = None
@@ -265,4 +340,24 @@ class SoftmaxLayer:
 
 
 if __name__ == "__main__":
-    pass
+    use_expand_data = False
+    mini_batch_size = 10
+    num_neuron_fully_layer = 100
+    if use_expand_data:
+        training_data, validation_data, test_data = load_data_shared("data/mnist_expanded.pkl.gz")
+    else:
+        training_data, validation_data, test_data = load_data_shared()
+    net = Network([
+        ConvPoolLayer(image_shape=(mini_batch_size, 1, 28, 28),
+                      filter_shape=(20, 1, 5, 5),
+                      pool_size=(2, 2),
+                      activation_fn=ReLU),
+        ConvPoolLayer(image_shape=(mini_batch_size, 20, 12, 12),
+                      filter_shape=(40, 20, 5, 5),
+                      pool_size=(2, 2),
+                      activation_fn=ReLU),
+        FullyConnectedLayer(n_in=40 * 4 * 4, n_out=num_neuron_fully_layer, activation_fn=ReLU),
+        SoftmaxLayer(n_in=num_neuron_fully_layer, n_out=10)], mini_batch_size)
+    net.sgd(training_data, 60, validation_data, test_data, eta=lambda epoch: 0.03, lmbda=0.1)
+
+
